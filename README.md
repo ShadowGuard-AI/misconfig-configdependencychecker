@@ -1,3 +1,5 @@
+![Banner](banner.png)
+
 # misconfig-ConfigDependencyChecker
 Identifies dependencies between configuration files. Analyzes included files or referenced variables within configurations to map out relationships. Highlights circular dependencies or missing dependencies that could lead to misconfigurations. Uses 'graphlib' (Python 3.9+) or constructs a simple graph data structure. - Focused on Check for misconfigurations in configuration files or infrastructure definitions
 
