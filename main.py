@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import re
 import sys
 import json
 import yaml
@@ -73,6 +74,39 @@ class ConfigDependencyChecker:
         except Exception as e:
             raise Exception(f"Error reading or parsing {config_file}: {e}")
 
+    def _resolve_dependency(self, config_file, dep):
+        if os.path.isabs(dep):
+            return dep
+        return os.path.join(os.path.dirname(config_file), dep)
+
+    def _collect_dependencies(self, config_file, node, dependencies):
+        """
+        Walks a parsed configuration at any depth and collects dependencies:
+        include and depends_on keys (a single string or a list), reference
+        keys ($ref, ref, reference, config_ref) naming a config file, and
+        variable references that name a config file, in the shapes
+        ${...file.yaml} and {{ ref('file.yaml') }}.
+        """
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in ('include', 'depends_on'):
+                    items = value if isinstance(value, list) else [value]
+                    for item in items:
+                        if isinstance(item, str):
+                            dependencies.append(self._resolve_dependency(config_file, item))
+                elif key in ('$ref', 'ref', 'reference', 'config_ref') and isinstance(value, str) \
+                        and value.endswith(('.yaml', '.yml', '.json')):
+                    dependencies.append(self._resolve_dependency(config_file, value))
+                self._collect_dependencies(config_file, value, dependencies)
+        elif isinstance(node, list):
+            for item in node:
+                self._collect_dependencies(config_file, item, dependencies)
+        elif isinstance(node, str):
+            for match in re.finditer(r"\$\{[^}]*?([A-Za-z0-9_./-]+\.(?:yaml|yml|json))", node):
+                dependencies.append(self._resolve_dependency(config_file, match.group(1)))
+            for match in re.finditer(r"\{\{\s*ref\(\s*[\"']([^\"']+)[\"']\s*\)\s*\}\}", node):
+                dependencies.append(self._resolve_dependency(config_file, match.group(1)))
+
     def _find_dependencies(self, config_file):
         """
         Finds dependencies (included files, referenced variables) within a configuration file.
@@ -82,32 +116,23 @@ class ConfigDependencyChecker:
 
         Returns:
             list: A list of config files that the given config_file depends on.
-            Returns an empty list if no dependencies are found or the file cannot be parsed.
+
+        Raises:
+            Exception: A missing, unreadable, malformed, or empty file is
+                raised to the caller. It is never treated as a file with no
+                dependencies.
         """
+        try:
+            with open(config_file, 'r') as f:
+                if not f.read().strip():
+                    raise ValueError(f"Empty configuration file: {config_file}. Nothing was checked.")
+        except FileNotFoundError:
+            raise ValueError(f"File not found: {config_file}")
+
+        config_data = self._parse_config(config_file)
 
         dependencies = []
-        try:
-            config_data = self._parse_config(config_file)
-        except Exception as e:
-            logging.error(f"Error processing {config_file}: {e}")
-            return [] # Return empty list in case of error
-
-        # This is a basic example and needs to be adapted based on specific config file structure
-        # and the method of including files or referencing variables.
-        # Replace 'include' and 'depends_on' with actual keys used in your configuration files.
-        if isinstance(config_data, dict):
-            if 'include' in config_data and isinstance(config_data['include'], str):
-                include_path = config_data['include']
-                # Resolve relative paths relative to the current config file's directory
-                include_path = os.path.join(os.path.dirname(config_file), include_path)
-                dependencies.append(include_path)
-            elif 'depends_on' in config_data and isinstance(config_data['depends_on'], list):
-                for dep in config_data['depends_on']:
-                    dep_path = dep
-                    # Resolve relative paths relative to the current config file's directory
-                    dep_path = os.path.join(os.path.dirname(config_file), dep_path)
-                    dependencies.append(dep_path)
-
+        self._collect_dependencies(config_file, config_data, dependencies)
         return dependencies
 
     def build_dependency_graph(self):
@@ -115,12 +140,9 @@ class ConfigDependencyChecker:
         Builds a dependency graph based on the configuration files.
         """
         for config_file in self.config_files:
-            try:
-                dependencies = self._find_dependencies(config_file)
-                self.dependencies[config_file] = dependencies
-                logging.debug(f"Dependencies for {config_file}: {dependencies}")
-            except Exception as e:
-                logging.error(f"Error building dependency graph for {config_file}: {e}")
+            dependencies = self._find_dependencies(config_file)
+            self.dependencies[config_file] = dependencies
+            logging.debug(f"Dependencies for {config_file}: {dependencies}")
 
     def check_circular_dependencies(self):
         """
@@ -155,6 +177,11 @@ class ConfigDependencyChecker:
     def analyze(self):
         """
         Performs the dependency analysis and reports findings.
+
+        Returns:
+            bool: True when every input was checked and no issue was found,
+            False when circular or missing dependencies were found. A file
+            that cannot be checked raises instead.
         """
         self.build_dependency_graph()
 
@@ -168,6 +195,8 @@ class ConfigDependencyChecker:
 
         if not circular_dependencies and not missing_dependencies:
             print("No dependency issues found.")
+            return True
+        return False
 
 
 def setup_argparse():
@@ -194,12 +223,15 @@ def main():
 
     try:
         checker = ConfigDependencyChecker(args.config_files, args.format, args.debug)
-        checker.analyze()
+        if not checker.analyze():
+            sys.exit(1)
     except ValueError as e:
         logging.error(f"Error: {e}")
+        print(f"Error: Unchecked input: {e}")
         sys.exit(1)
     except Exception as e:
-        logging.exception("An unexpected error occurred:")
+        logging.error(f"Error: {e}")
+        print(f"Error: Unchecked input: {e}")
         sys.exit(1)
 
 

@@ -14,5 +14,15 @@ Identifies dependencies between configuration files. Analyzes included files or 
 - `-f`: Specify the configuration file format (
 - `-d`: Enable debug logging.
 
+## What is checked
+- `include` and `depends_on` keys at any depth in the file. Each one may hold a single path or a list of paths, and a file that carries both keys has both of them checked.
+- Reference keys (`$ref`, `ref`, `reference`, `config_ref`) that name a `.yaml`, `.yml`, or `.json` file.
+- Variable references that name a config file, in the shapes `${...file.yaml}` and `{{ ref('file.yaml') }}`.
+- Paths are resolved against the directory of the file that names them. The tool prints paths only, never configuration values.
+
+## Exit codes
+- Exit 0: every input was read and checked, and no circular or missing dependency was found.
+- Exit 1: circular or missing dependencies were found, or an input could not be checked at all. A missing file, a malformed file, and an empty file are each reported as an unchecked input at exit 1. They are never reported as "No dependency issues found."
+
 ## License
 Copyright (c) ShadowStrikeHQ
