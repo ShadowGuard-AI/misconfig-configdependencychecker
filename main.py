@@ -77,6 +77,11 @@ class ConfigDependencyChecker:
     def _resolve_dependency(self, config_file, dep):
         if os.path.isabs(dep):
             return dep
+        # I resolve a relative reference against the folder of the file
+        # that names it, which is the only reading that makes nested
+        # includes work. I do not normalise the result, so the same file
+        # reached as ./b.yaml and as b.yaml stays two different strings
+        # in the graph below.
         return os.path.join(os.path.dirname(config_file), dep)
 
     def _collect_dependencies(self, config_file, node, dependencies):
@@ -89,6 +94,12 @@ class ConfigDependencyChecker:
         """
         if isinstance(node, dict):
             for key, value in node.items():
+                # Every string under these keys is treated as a file path. That
+                # is a real overreach for depends_on, which in plenty of config
+                # formats names services rather than files: those names resolve
+                # to paths that do not exist and get reported as missing below.
+                # Reference keys further down are gated by file extension, and
+                # these two keys are not, which is an inconsistency I keep visible.
                 if key in ('include', 'depends_on'):
                     items = value if isinstance(value, list) else [value]
                     for item in items:
@@ -97,11 +108,18 @@ class ConfigDependencyChecker:
                 elif key in ('$ref', 'ref', 'reference', 'config_ref') and isinstance(value, str) \
                         and value.endswith(('.yaml', '.yml', '.json')):
                     dependencies.append(self._resolve_dependency(config_file, value))
+                # I walk the value even when the key above already consumed it,
+                # because an include can hold a nested structure. Nothing dedupes
+                # the list, so a file named three times is reported three times
+                # in the missing check later.
                 self._collect_dependencies(config_file, value, dependencies)
         elif isinstance(node, list):
             for item in node:
                 self._collect_dependencies(config_file, item, dependencies)
         elif isinstance(node, str):
+            # This search never asks for the closing brace, so an unfinished
+            # reference still yields a dependency. I would rather chase a
+            # file a broken template pointed at than drop the reference.
             for match in re.finditer(r"\$\{[^}]*?([A-Za-z0-9_./-]+\.(?:yaml|yml|json))", node):
                 dependencies.append(self._resolve_dependency(config_file, match.group(1)))
             for match in re.finditer(r"\{\{\s*ref\(\s*[\"']([^\"']+)[\"']\s*\)\s*\}\}", node):
@@ -124,6 +142,9 @@ class ConfigDependencyChecker:
         """
         try:
             with open(config_file, 'r') as f:
+                # I open the file here only to prove it is not empty, and then
+                # _parse_config opens it again. Between the two reads nothing
+                # checks that the file stayed the same.
                 if not f.read().strip():
                     raise ValueError(f"Empty configuration file: {config_file}. Nothing was checked.")
         except FileNotFoundError:
@@ -151,6 +172,12 @@ class ConfigDependencyChecker:
         Returns:
             bool: True if circular dependencies are found, False otherwise.
         """
+        # The sorter takes my mapping as given: keys are the paths as
+        # they were passed in, values are the resolved paths from
+        # _resolve_dependency. Where those two spellings disagree for
+        # the same file, the sorter sees separate nodes and a cycle
+        # through that file can slip past this check, while the missing
+        # check below still passes it because the path exists on disk.
         ts = TopologicalSorter(self.dependencies)
         try:
             list(ts.static_order())  # Attempt to create a topological order
@@ -169,6 +196,11 @@ class ConfigDependencyChecker:
         missing_dependencies = []
         for config_file, dependencies in self.dependencies.items():
             for dependency in dependencies:
+                # Three tests, and the first two mostly overlap, since after
+                # build_dependency_graph the keys of self.dependencies are the
+                # config files. The existence test is the one doing the real
+                # work: a dependency that was never handed to me still counts
+                # as present when it is on disk where the reference points.
                 if dependency not in self.dependencies and dependency not in self.config_files and not os.path.exists(dependency):
                     missing_dependencies.append(dependency)
                     logging.warning(f"Missing dependency: {dependency} (required by {config_file})")
@@ -183,6 +215,11 @@ class ConfigDependencyChecker:
             False when circular or missing dependencies were found. A file
             that cannot be checked raises instead.
         """
+        # analyze can be called twice on one checker and the second run
+        # adds to the graph the first run built instead of replacing it,
+        # because build_dependency_graph never clears self.dependencies.
+        # The command line path calls this once, so the stale entries
+        # only appear for anyone reusing the class as a library.
         self.build_dependency_graph()
 
         circular_dependencies = self.check_circular_dependencies()
